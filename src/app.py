@@ -5,11 +5,15 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from pydantic import BaseModel
 import os
 from pathlib import Path
+
+from . import auth
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +22,27 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+class RegisterModel(BaseModel):
+    email: str
+    password: str
+    role: str = "member"
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    payload = auth.decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    user = auth.get_user(email)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 # In-memory activity database
 activities = {
@@ -130,3 +155,30 @@ def unregister_from_activity(activity_name: str, email: str):
     # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
+
+
+# --- Authentication routes ---
+
+
+@app.post("/auth/register")
+def register(data: RegisterModel):
+    try:
+        user = auth.create_user(data.email, data.password, role=data.role)
+        return {"message": "user created", "email": user["email"]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/auth/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = auth.authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = auth.create_access_token({"sub": user["email" ]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/auth/me")
+def me(current_user: dict = Depends(get_current_user)):
+    safe = {"email": current_user["email"], "role": current_user.get("role", "member")}
+    return safe
